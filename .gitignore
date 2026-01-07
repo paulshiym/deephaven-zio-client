@@ -1,0 +1,38 @@
+# === Scala / sbt ===
+target/
+project/target/
+project/project/
+
+# === Metals (Scala language server) ===
+.metals/
+.metals.sbt
+metals.sbt
+
+# === Bloop (build server) ===
+.bloop/
+
+# === VS Code ===
+.vscode/
+
+# === IntelliJ IDEA ===
+.idea/
+*.iml
+
+# === Logs & temp files ===
+*.log
+*.tmp
+*.swp
+*.bak
+
+# === OS-specific ===
+# macOS
+.DS_Store
+# Windows
+Thumbs.db
+
+# === Java / JVM ===
+*.class
+*.jar
+*.war
+*.ear
+
