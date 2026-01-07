@@ -1,3 +1,12 @@
+.bsp/
+.tmp_auth/
+.tmp_config/
+.tmp_flight/
+.tmp_proto/
+.tmp_uri/
+.sbtopts
+.gitconfig
+
 # === Scala / sbt ===
 target/
 project/target/
