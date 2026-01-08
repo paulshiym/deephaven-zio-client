@@ -22,7 +22,7 @@ object TestClient extends ZIOAppDefault {
         } yield TickData(symbols(idx), now, value * 100.0)
       }
       .schedule(Schedule.spaced(200.millis))
-      .take(25)
+      //.take(25)
 
   override val bootstrap: ZLayer[Any, Nothing, Unit] =
     Runtime.removeDefaultLoggers >>> SLF4J.slf4j(LogFormat.colored)
@@ -37,7 +37,7 @@ object TestClient extends ZIOAppDefault {
           ZIO
             .fromOption(sys.env.get("DEEPHAVEN_PSK"))
             .orElseFail(new IllegalArgumentException("DEEPHAVEN_PSK is not set"))
-            .map(psk => s"psk $psk")
+            .map(psk => s"io.deephaven.authentication.psk.PskAuthenticationHandler $psk")
       }
       _ <- DeephavenService.publish(
         tableName = "ticks",
