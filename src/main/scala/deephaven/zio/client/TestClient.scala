@@ -1,13 +1,13 @@
 package deephaven.zio.client
 
-import java.time.LocalTime
+import java.time.Instant
 
 import zio._
 import zio.stream._
 import zio.logging.LogFormat
 import zio.logging.backend.SLF4J
 
-final case class TickData(symbol: String, time: LocalTime, value: Double)
+final case class TickData(symbol: String, time: Instant, value: Double)
 
 object TestClient extends ZIOAppDefault {
   private val symbols = Vector("AAPL", "MSFT", "GOOG", "AMZN", "TSLA")
@@ -18,7 +18,7 @@ object TestClient extends ZIOAppDefault {
         for {
           idx <- Random.nextIntBounded(symbols.size)
           value <- Random.nextDouble
-          now <- Clock.localDateTime.map(_.toLocalTime)
+          now <- Clock.instant
         } yield TickData(symbols(idx), now, value * 100.0)
       }
       .schedule(Schedule.spaced(200.millis))
