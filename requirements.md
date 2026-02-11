@@ -73,6 +73,15 @@ Define a bidirectional mapping between Arrow schemas and Scala case classes usin
 - Avoid excessive allocations where possible; reuse vectors/buffers in batching where safe.
 - Clear, user-facing errors for unsupported types.
 
+## Java 17+ note (Apache Arrow)
+Apache Arrow requires additional JVM flags on Java 17+ due to the module system.
+
+In CI we set:
+
+- `JAVA_TOOL_OPTIONS=--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED`
+
+If you run tests locally on Java 17+, use the same env var (or configure your build accordingly).
+
 ## Out of Scope
 - Custom field name annotations or renaming logic.
 - Advanced nested structures beyond List and Option unless specified later.

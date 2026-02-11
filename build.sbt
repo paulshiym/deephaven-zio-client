@@ -28,7 +28,7 @@ lazy val root = (project in file("."))
 
       val arrowDeps = Seq(
         "org.apache.arrow" % "arrow-vector" % arrowVersion,
-        "org.apache.arrow" % "arrow-memory-unsafe" % arrowVersion,
+        // Use Arrow's common default allocation manager (netty)
         "org.apache.arrow" % "arrow-memory-netty" % arrowVersion
       )
 
