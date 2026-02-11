@@ -25,6 +25,7 @@ final class RemoteDeephaven private (
     session: SessionImpl,
     flightClient: FlightClient,
     barrage: BarrageSession,
+    updateGraph: io.deephaven.engine.updategraph.UpdateGraph,
     allocator: BufferAllocator,
     exports: Ref[Chunk[ExportId]]
 ) extends DeephavenService {
@@ -92,37 +93,50 @@ final class RemoteDeephaven private (
         _ <- ZIO.attemptBlocking(handle.await())
 
         options = BarrageSubscriptionOptions.builder().build()
-        sub <- ZIO.attemptBlocking(barrage.subscribe(handle, options))
-        table <- ZIO.attemptBlocking(sub.entireTable().get())
+
+        // BarrageTable construction uses ExecutionContext.getContext().getUpdateGraph().
+        // Make sure we run the subscription under an ExecutionContext with a refreshing update graph.
+        execCtx = io.deephaven.engine.context.ExecutionContext.getDefaultContext().withUpdateGraph(updateGraph)
+
+        sub <- ZIO.attemptBlocking(execCtx.apply(() => barrage.subscribe(handle, options)))
+        table <- ZIO.attemptBlocking(execCtx.apply(() => sub.entireTable().get()))
 
         // Emit initial snapshot (existing rows)
         _ <- ZIO.attemptBlocking {
-          val it = table.getRowSet().iterator()
-          while (it.hasNext) {
-            val key = it.nextLong()
-            Unsafe.unsafe { implicit u =>
-              Runtime.default.unsafe.run(hub.publish(DeephavenRowDecoder[A].decode(table, key))).getOrThrowFiberFailure()
+          execCtx.apply(new Runnable {
+            override def run(): Unit = {
+              val it = table.getRowSet().iterator()
+              while (it.hasNext) {
+                val key = it.nextLong()
+                Unsafe.unsafe { implicit u =>
+                  Runtime.default.unsafe.run(hub.publish(DeephavenRowDecoder[A].decode(table, key))).getOrThrowFiberFailure()
+                }
+              }
             }
-          }
+          })
         }.forkDaemon
 
         // Subscribe to live updates (append-only expected; we emit added rows)
         _ <- ZIO.attemptBlocking {
-          table.addUpdateListener(new io.deephaven.engine.table.impl.InstrumentedTableUpdateListenerAdapter("zio-barrage-subscribe", table, false) {
-            override def onUpdate(update: io.deephaven.engine.table.TableUpdate): Unit = {
-              val acquired = update.acquire()
-              try {
-                val it = acquired.added().iterator()
-                while (it.hasNext) {
-                  val key = it.nextLong()
-                  val a = DeephavenRowDecoder[A].decode(table, key)
-                  Unsafe.unsafe { implicit u =>
-                    Runtime.default.unsafe.run(hub.publish(a)).getOrThrowFiberFailure()
+          execCtx.apply(new Runnable {
+            override def run(): Unit = {
+              table.addUpdateListener(new InstrumentedTableUpdateListenerAdapter("zio-barrage-subscribe", table, false) {
+                override def onUpdate(update: io.deephaven.engine.table.TableUpdate): Unit = {
+                  val acquired = update.acquire()
+                  try {
+                    val it = acquired.added().iterator()
+                    while (it.hasNext) {
+                      val key = it.nextLong()
+                      val a = DeephavenRowDecoder[A].decode(table, key)
+                      Unsafe.unsafe { implicit u =>
+                        Runtime.default.unsafe.run(hub.publish(a)).getOrThrowFiberFailure()
+                      }
+                    }
+                  } finally {
+                    acquired.release()
                   }
                 }
-              } finally {
-                acquired.release()
-              }
+              })
             }
           })
         }
@@ -211,11 +225,23 @@ object RemoteDeephaven {
             Collections.singletonList(new SessionMiddleware(session))
           )
         })(client => ZIO.attempt(client.close()).ignore)
+        // Barrage subscription relies on a refreshing UpdateGraph on the client side.
+        // We start a PeriodicUpdateGraph to process subscription updates.
+        updateGraph <- ZIO.acquireRelease(
+          ZIO.attempt {
+            val ug = io.deephaven.engine.updategraph.impl.PeriodicUpdateGraph
+              .newBuilder("DEFAULT")
+              .existingOrBuild()
+            ug.start()
+            ug
+          }
+        )(ug => ZIO.attempt(ug.stop()).ignore)
+
         barrage <- ZIO.acquireRelease(
           ZIO.attempt(BarrageSession.of(session, allocator, factory.managedChannel()))
         )(b => ZIO.attempt(b.close()).ignore)
         exports <- Ref.make(Chunk.empty[ExportId])
-        service = new RemoteDeephaven(session, flightClient, barrage, allocator, exports)
+        service = new RemoteDeephaven(session, flightClient, barrage, updateGraph, allocator, exports)
         _ <- ZIO.addFinalizer(service.close())
         _ <- ZIO.addFinalizer(ZIO.attempt(factory.managedChannel().shutdown()).ignore)
       } yield service
