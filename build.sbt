@@ -35,6 +35,7 @@ lazy val root = (project in file("."))
       val deephavenDeps = Seq(
         "io.deephaven" % "deephaven-java-client-session" % deephavenVersion,
         "io.deephaven" % "deephaven-java-client-flight" % deephavenVersion,
+        "io.deephaven" % "deephaven-java-client-barrage" % deephavenVersion,
         "io.deephaven" % "deephaven-uri" % deephavenVersion
       )
 

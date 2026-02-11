@@ -7,6 +7,9 @@ import java.util.concurrent.Executors
 import io.deephaven.client.impl.{ClientConfig, ExportId, FlightDescriptorHelper, SessionConfig, SessionFactoryConfig, SessionImpl, SessionMiddleware}
 import io.deephaven.proto.DeephavenChannelImpl
 import io.deephaven.proto.backplane.grpc.{AuthenticationConstantsRequest, ConfigValue}
+import io.deephaven.client.impl.BarrageSession
+import io.deephaven.engine.table.impl.InstrumentedTableUpdateListenerAdapter
+import io.deephaven.extensions.barrage.BarrageSubscriptionOptions
 import io.deephaven.qst.table.InMemoryAppendOnlyInputTable
 import io.deephaven.uri.DeephavenTarget
 import org.apache.arrow.flight.{AsyncPutListener, FlightClient, FlightGrpcUtilsExtension}
@@ -21,6 +24,7 @@ import scala.jdk.CollectionConverters._
 final class RemoteDeephaven private (
     session: SessionImpl,
     flightClient: FlightClient,
+    barrage: BarrageSession,
     allocator: BufferAllocator,
     exports: Ref[Chunk[ExportId]]
 ) extends DeephavenService {
@@ -75,8 +79,56 @@ final class RemoteDeephaven private (
       } yield ()
     }
 
-  override def subscribe[A: ArrowSchema](tableName: String): ZStream[Any, Throwable, A] =
-    ZStream.fail(new UnsupportedOperationException("Remote subscribe is not implemented yet"))
+  override def subscribe[A: ArrowSchema: DeephavenRowDecoder](tableName: String): ZStream[Any, Throwable, A] =
+    ZStream.scoped {
+      for {
+        hub <- Hub.unbounded[A]
+        // Resolve the published table by name (query scope ticket)
+        handle <- ZIO.attemptBlocking(session.serial().ticket(tableName))
+        _ <- ZIO.attemptBlocking(handle.await())
+
+        options = BarrageSubscriptionOptions.builder().build()
+        sub <- ZIO.attemptBlocking(barrage.subscribe(handle, options))
+        table <- ZIO.attemptBlocking(sub.entireTable().get())
+
+        // Emit initial snapshot (existing rows)
+        _ <- ZIO.attemptBlocking {
+          val it = table.getRowSet().iterator()
+          while (it.hasNext) {
+            val key = it.nextLong()
+            Unsafe.unsafe { implicit u =>
+              Runtime.default.unsafe.run(hub.publish(DeephavenRowDecoder[A].decode(table, key))).getOrThrowFiberFailure()
+            }
+          }
+        }.forkDaemon
+
+        // Subscribe to live updates (append-only expected; we emit added rows)
+        _ <- ZIO.attemptBlocking {
+          table.addUpdateListener(new io.deephaven.engine.table.impl.InstrumentedTableUpdateListenerAdapter("zio-barrage-subscribe", table, false) {
+            override def onUpdate(update: io.deephaven.engine.table.TableUpdate): Unit = {
+              val acquired = update.acquire()
+              try {
+                val it = acquired.added().iterator()
+                while (it.hasNext) {
+                  val key = it.nextLong()
+                  val a = DeephavenRowDecoder[A].decode(table, key)
+                  Unsafe.unsafe { implicit u =>
+                    Runtime.default.unsafe.run(hub.publish(a)).getOrThrowFiberFailure()
+                  }
+                }
+              } finally {
+                acquired.release()
+              }
+            }
+          })
+        }
+
+        stream = ZStream.fromHub(hub)
+        // Ensure resources released
+        _ <- ZIO.addFinalizer(ZIO.attemptBlocking(handle.close()).ignore)
+        _ <- ZIO.addFinalizer(hub.shutdown.ignore)
+      } yield stream
+    }.flatten
 
   def close(): UIO[Unit] =
     for {
@@ -155,8 +207,11 @@ object RemoteDeephaven {
             Collections.singletonList(new SessionMiddleware(session))
           )
         })(client => ZIO.attempt(client.close()).ignore)
+        barrage <- ZIO.acquireRelease(
+          ZIO.attempt(BarrageSession.of(session, allocator, factory.managedChannel()))
+        )(b => ZIO.attempt(b.close()).ignore)
         exports <- Ref.make(Chunk.empty[ExportId])
-        service = new RemoteDeephaven(session, flightClient, allocator, exports)
+        service = new RemoteDeephaven(session, flightClient, barrage, allocator, exports)
         _ <- ZIO.addFinalizer(service.close())
         _ <- ZIO.addFinalizer(ZIO.attempt(factory.managedChannel().shutdown()).ignore)
       } yield service

@@ -14,7 +14,7 @@ trait DeephavenService {
       mode: UpdateMode = UpdateMode.AppendOnly
   ): ZIO[Any, Throwable, Unit]
 
-  def subscribe[A: ArrowSchema](tableName: String): ZStream[Any, Throwable, A]
+  def subscribe[A: ArrowSchema: DeephavenRowDecoder](tableName: String): ZStream[Any, Throwable, A]
 }
 
 object DeephavenService {
@@ -26,7 +26,7 @@ object DeephavenService {
   ): ZIO[DeephavenService, Throwable, Unit] =
     ZIO.serviceWithZIO[DeephavenService](_.publish(tableName, stream, batchSize, mode))
 
-  def subscribe[A: ArrowSchema](tableName: String): ZStream[DeephavenService, Throwable, A] =
+  def subscribe[A: ArrowSchema: DeephavenRowDecoder](tableName: String): ZStream[DeephavenService, Throwable, A] =
     ZStream.serviceWithStream[DeephavenService](_.subscribe[A](tableName))
 
   val live: ZLayer[Any, Throwable, DeephavenService] =
@@ -43,7 +43,7 @@ object DeephavenService {
         ): ZIO[Any, Throwable, Unit] =
           inMemory.publish(tableName, stream, batchSize, mode)
 
-        override def subscribe[A: ArrowSchema](tableName: String): ZStream[Any, Throwable, A] =
+        override def subscribe[A: ArrowSchema: DeephavenRowDecoder](tableName: String): ZStream[Any, Throwable, A] =
           inMemory.subscribe(tableName)
       }
     }
