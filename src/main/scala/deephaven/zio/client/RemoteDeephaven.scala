@@ -10,6 +10,7 @@ import io.deephaven.proto.backplane.grpc.{AuthenticationConstantsRequest, Config
 import io.deephaven.uri.DeephavenTarget
 import org.apache.arrow.flight.{AsyncPutListener, FlightClient, FlightGrpcUtilsExtension}
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
+import org.apache.arrow.vector.VectorSchemaRoot
 
 import deephaven.zio.arrow.{ArrowBatch, ArrowSchema}
 import zio._
@@ -29,27 +30,67 @@ final class RemoteDeephaven private (
       batchSize: Int,
       mode: UpdateMode
   ): ZIO[Any, Throwable, Unit] =
-    for {
-      rows <- stream.runCollect
-      _ <- ZIO.when(rows.nonEmpty) {
-        ZIO.attemptBlocking {
-          val root = ArrowBatch.encodeRows(allocator, rows)
-          try {
-            val exportId = session.newExportId()
-            val descriptor = FlightDescriptorHelper.descriptor(exportId)
-            val out = flightClient.startPut(descriptor, root, new AsyncPutListener())
-            out.putNext()
-            root.clear()
-            out.completed()
-            out.getResult()
-            session.publish(tableName, exportId).get()
-            exportId
-          } finally {
-            root.close()
+    ZIO.scoped {
+      for {
+        _ <- ZIO.when(batchSize <= 0)(ZIO.fail(new IllegalArgumentException(s"batchSize must be > 0, got $batchSize")))
+        _ <- ZIO.unless(mode == UpdateMode.AppendOnly) {
+          ZIO.fail(new UnsupportedOperationException(s"Remote publish currently supports AppendOnly only, got: $mode"))
+        }
+
+        exportId <- ZIO.attempt(session.newExportId())
+        descriptor = FlightDescriptorHelper.descriptor(exportId)
+
+        // Lazily initialize the DoPut stream with the first batch.
+        // We keep the root and DoPut listener for subsequent batches.
+        // NOTE: session.publish returns a future that may not complete until the server-side export exists,
+        // so we intentionally do NOT block on it until after the DoPut completes.
+        state <- Ref.make[Option[(FlightClient.ClientStreamListener, VectorSchemaRoot, java.util.concurrent.CompletableFuture[_])]](None)
+
+        _ <- stream
+          .grouped(batchSize)
+          .runForeach { chunk =>
+            state.get.flatMap {
+              case None =>
+                ZIO.attemptBlocking {
+                  val root = ArrowBatch.encodeRows(allocator, chunk)
+                  val out = flightClient.startPut(descriptor, root, new AsyncPutListener())
+                  // Start streaming the first record batch.
+                  out.putNext()
+                  // Publish the name immediately, but don't block waiting for it.
+                  val publishF = session.publish(tableName, exportId)
+                  (out, root, publishF)
+                }.flatMap { case (out, root, publishF) =>
+                  exports.update(_ :+ exportId) *> state.set(Some((out, root, publishF)))
+                }
+
+              case Some((out, root, _publishF)) =>
+                ZIO.attemptBlocking {
+                  root.clear()
+                  root.allocateNew()
+                  val writer = ArrowSchema[A].writer(root)
+                  chunk.zipWithIndex.foreach { case (row, index) => writer.write(index, row) }
+                  writer.setValueCount(chunk.size)
+                  root.setRowCount(chunk.size)
+                  out.putNext()
+                }
+            }
           }
-        }.flatMap(exportId => exports.update(_ :+ exportId))
-      }
-    } yield ()
+          .ensuring {
+            state.get.flatMap {
+              case None => ZIO.unit
+              case Some((out, root, publishF)) =>
+                ZIO.attemptBlocking {
+                  out.completed()
+                  out.getResult()
+                  // Ensure the publish future is observed (and propagate failures) after the data upload completes.
+                  publishF.get()
+                  root.close()
+                  ()
+                }.ignore
+            }
+          }
+      } yield ()
+    }
 
   override def subscribe[A: ArrowSchema](tableName: String): ZStream[Any, Throwable, A] =
     ZStream.fail(new UnsupportedOperationException("Remote subscribe is not implemented yet"))
