@@ -83,8 +83,12 @@ final class RemoteDeephaven private (
     ZStream.scoped {
       for {
         hub <- Hub.unbounded[A]
-        // Resolve the published table by name (query scope ticket)
-        handle <- ZIO.attemptBlocking(session.serial().ticket(tableName))
+        // Resolve the published table by name from the server query scope.
+        // NOTE: `ticket(String)` expects a Deephaven ticket string, not a published name.
+        handle <- ZIO.attemptBlocking {
+          val spec = io.deephaven.qst.table.TicketTable.fromQueryScopeField(tableName)
+          session.serial().of(spec)
+        }
         _ <- ZIO.attemptBlocking(handle.await())
 
         options = BarrageSubscriptionOptions.builder().build()
