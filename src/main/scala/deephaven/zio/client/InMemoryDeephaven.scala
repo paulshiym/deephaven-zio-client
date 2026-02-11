@@ -48,7 +48,7 @@ final class InMemoryDeephaven private (
     } yield ()
   }
 
-  def subscribe[A: ArrowSchema](tableName: String): ZStream[Any, Throwable, A] =
+  def subscribe[A: ArrowSchema: DeephavenRowDecoder](tableName: String): ZStream[Any, Throwable, A] =
     ZStream.unwrap {
       store.get.map { tables =>
         tables.get(tableName) match {
