@@ -24,12 +24,34 @@ object ArrowBatch {
     Chunk.fromIterable(0 until rowCount).map(reader.read)
   }
 
+  /**
+    * Encodes a stream into Arrow batches.
+    *
+    * IMPORTANT: The returned VectorSchemaRoot values must be closed by the caller.
+    * If you want automatic closing, use [[encodeStreamManaged]].
+    */
   def encodeStream[A: ArrowSchema](
       stream: ZStream[Any, Throwable, A],
       allocator: BufferAllocator,
       batchSize: Int
   ): ZStream[Any, Throwable, VectorSchemaRoot] =
     stream.grouped(batchSize).map(chunk => encodeRows[A](allocator, chunk))
+
+  /**
+    * Encodes a stream into Arrow batches and automatically closes each batch after it is emitted downstream.
+    *
+    * This is safer for long-running streams to avoid leaking off-heap Arrow memory.
+    */
+  def encodeStreamManaged[A: ArrowSchema](
+      stream: ZStream[Any, Throwable, A],
+      allocator: BufferAllocator,
+      batchSize: Int
+  ): ZStream[Any, Throwable, VectorSchemaRoot] =
+    stream.grouped(batchSize).flatMap { chunk =>
+      ZStream.acquireReleaseWith(
+        ZIO.attempt(encodeRows[A](allocator, chunk))
+      )(root => ZIO.succeed(root.close()).ignore)(root => ZStream.succeed(root))
+    }
 
   def decodeStream[A: ArrowSchema](batches: ZStream[Any, Throwable, VectorSchemaRoot]): ZStream[Any, Throwable, A] =
     batches.flatMap { root =>
