@@ -36,6 +36,7 @@ lazy val root = (project in file("."))
         "io.deephaven" % "deephaven-java-client-session" % deephavenVersion,
         "io.deephaven" % "deephaven-java-client-flight" % deephavenVersion,
         "io.deephaven" % "deephaven-java-client-barrage" % deephavenVersion,
+        "io.deephaven" % "deephaven-log-to-slf4j" % deephavenVersion,
         "io.deephaven" % "deephaven-uri" % deephavenVersion
       )
 
