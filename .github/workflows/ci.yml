@@ -24,4 +24,6 @@ jobs:
         uses: sbt/setup-sbt@v1
 
       - name: Run unit tests
+        env:
+          JAVA_TOOL_OPTIONS: "--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
         run: sbt -v test
