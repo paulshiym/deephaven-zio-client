@@ -40,5 +40,9 @@ lazy val root = (project in file("."))
 
       zioDeps ++ shapelessDeps ++ arrowDeps ++ deephavenDeps
     },
-    testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
+    testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
+    // Needed for Apache Arrow on Java 17+ (reflective access to java.nio.Buffer.address)
+    Test / javaOptions ++= Seq(
+      "--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
+    )
   )
