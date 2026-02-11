@@ -7,7 +7,7 @@ import zio._
 import zio.stream._
 
 trait DeephavenService {
-  def publish[A: ArrowSchema](
+  def publish[A: ArrowSchema: DeephavenTableSchema](
       tableName: String,
       stream: ZStream[Any, Throwable, A],
       batchSize: Int,
@@ -18,7 +18,7 @@ trait DeephavenService {
 }
 
 object DeephavenService {
-  def publish[A: ArrowSchema](
+  def publish[A: ArrowSchema: DeephavenTableSchema](
       tableName: String,
       stream: ZStream[Any, Throwable, A],
       batchSize: Int,
@@ -35,7 +35,7 @@ object DeephavenService {
         allocator <- ZIO.acquireRelease(ZIO.attempt(new RootAllocator(Long.MaxValue)))(alloc => ZIO.attempt(alloc.close()).ignore)
         inMemory <- ZIO.acquireRelease(InMemoryDeephaven.make(allocator))(_.close())
       } yield new DeephavenService {
-        override def publish[A: ArrowSchema](
+        override def publish[A: ArrowSchema: DeephavenTableSchema](
             tableName: String,
             stream: ZStream[Any, Throwable, A],
             batchSize: Int,

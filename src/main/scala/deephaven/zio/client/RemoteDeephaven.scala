@@ -7,6 +7,7 @@ import java.util.concurrent.Executors
 import io.deephaven.client.impl.{ClientConfig, ExportId, FlightDescriptorHelper, SessionConfig, SessionFactoryConfig, SessionImpl, SessionMiddleware}
 import io.deephaven.proto.DeephavenChannelImpl
 import io.deephaven.proto.backplane.grpc.{AuthenticationConstantsRequest, ConfigValue}
+import io.deephaven.qst.table.InMemoryAppendOnlyInputTable
 import io.deephaven.uri.DeephavenTarget
 import org.apache.arrow.flight.{AsyncPutListener, FlightClient, FlightGrpcUtilsExtension}
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
@@ -24,7 +25,7 @@ final class RemoteDeephaven private (
     exports: Ref[Chunk[ExportId]]
 ) extends DeephavenService {
 
-  override def publish[A: ArrowSchema](
+  override def publish[A: ArrowSchema: DeephavenTableSchema](
       tableName: String,
       stream: ZStream[Any, Throwable, A],
       batchSize: Int,
@@ -37,58 +38,40 @@ final class RemoteDeephaven private (
           ZIO.fail(new UnsupportedOperationException(s"Remote publish currently supports AppendOnly only, got: $mode"))
         }
 
-        exportId <- ZIO.attempt(session.newExportId())
-        descriptor = FlightDescriptorHelper.descriptor(exportId)
-
-        // Lazily initialize the DoPut stream with the first batch.
-        // We keep the root and DoPut listener for subsequent batches.
-        // NOTE: session.publish returns a future that may not complete until the server-side export exists,
-        // so we intentionally do NOT block on it until after the DoPut completes.
-        state <- Ref.make[Option[(FlightClient.ClientStreamListener, VectorSchemaRoot, java.util.concurrent.CompletableFuture[_])]](None)
+        // Create an append-only input table with a schema derived from A.
+        tableHeader = DeephavenTableSchema[A].header
+        inputSpec: io.deephaven.qst.table.InputTable = InMemoryAppendOnlyInputTable.of(tableHeader)
+        inputTable <- ZIO.attemptBlocking(session.serial().of(inputSpec))
+        _ <- ZIO.attemptBlocking(inputTable.await())
+        _ <- ZIO.attemptBlocking(session.publish(tableName, inputTable).get())
 
         _ <- stream
           .grouped(batchSize)
           .runForeach { chunk =>
-            state.get.flatMap {
-              case None =>
-                ZIO.attemptBlocking {
-                  val root = ArrowBatch.encodeRows(allocator, chunk)
-                  val out = flightClient.startPut(descriptor, root, new AsyncPutListener())
-                  // Start streaming the first record batch.
-                  out.putNext()
-                  // Publish the name immediately, but don't block waiting for it.
-                  val publishF = session.publish(tableName, exportId)
-                  (out, root, publishF)
-                }.flatMap { case (out, root, publishF) =>
-                  exports.update(_ :+ exportId) *> state.set(Some((out, root, publishF)))
-                }
+            ZIO.attemptBlocking {
+              // Upload the batch as a temporary table via Arrow Flight
+              val exportId = session.newExportId()
+              val descriptor = FlightDescriptorHelper.descriptor(exportId)
+              val root = ArrowBatch.encodeRows(allocator, chunk)
+              try {
+                val out = flightClient.startPut(descriptor, root, new AsyncPutListener())
+                out.putNext()
+                root.clear()
+                out.completed()
+                out.getResult()
+              } finally {
+                root.close()
+              }
 
-              case Some((out, root, _publishF)) =>
-                ZIO.attemptBlocking {
-                  root.clear()
-                  root.allocateNew()
-                  val writer = ArrowSchema[A].writer(root)
-                  chunk.zipWithIndex.foreach { case (row, index) => writer.write(index, row) }
-                  writer.setValueCount(chunk.size)
-                  root.setRowCount(chunk.size)
-                  out.putNext()
-                }
+              // Append the uploaded rows into the input table.
+              session.addToInputTable(inputTable, exportId).get()
+
+              // Release the temporary export.
+              session.release(exportId).get()
+              ()
             }
           }
-          .ensuring {
-            state.get.flatMap {
-              case None => ZIO.unit
-              case Some((out, root, publishF)) =>
-                ZIO.attemptBlocking {
-                  out.completed()
-                  out.getResult()
-                  // Ensure the publish future is observed (and propagate failures) after the data upload completes.
-                  publishF.get()
-                  root.close()
-                  ()
-                }.ignore
-            }
-          }
+          .ensuring(ZIO.attemptBlocking(inputTable.close()).ignore)
       } yield ()
     }
 

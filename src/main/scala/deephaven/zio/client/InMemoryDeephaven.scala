@@ -18,7 +18,7 @@ final class InMemoryDeephaven private (
     store: Ref[Map[String, InMemoryDeephaven.TableState]],
     allocator: BufferAllocator
 ) {
-  def publish[A: ArrowSchema](
+  def publish[A: ArrowSchema: DeephavenTableSchema](
       tableName: String,
       stream: ZStream[Any, Throwable, A],
       batchSize: Int,
