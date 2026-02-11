@@ -48,9 +48,11 @@ object ArrowBatch {
       batchSize: Int
   ): ZStream[Any, Throwable, VectorSchemaRoot] =
     stream.grouped(batchSize).flatMap { chunk =>
-      ZStream.acquireReleaseWith(
-        ZIO.attempt(encodeRows[A](allocator, chunk))
-      )(root => ZIO.succeed(root.close()).ignore)(root => ZStream.succeed(root))
+      ZStream.acquireReleaseWith(ZIO.attempt(encodeRows[A](allocator, chunk))) {
+        (root: VectorSchemaRoot) => ZIO.succeed(root.close()).ignore
+      } { (root: VectorSchemaRoot) =>
+        ZStream.succeed(root)
+      }
     }
 
   def decodeStream[A: ArrowSchema](batches: ZStream[Any, Throwable, VectorSchemaRoot]): ZStream[Any, Throwable, A] =
